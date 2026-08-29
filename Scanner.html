@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>APSS QR Attendance Scanner</title>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; background:#f3f4f6; font-family:Arial,sans-serif; color:#111827; }
+  .wrap { max-width:520px; margin:auto; padding:18px; }
+  .card { background:#fff; border-radius:16px; padding:18px; box-shadow:0 3px 18px rgba(0,0,0,.08); }
+  h1 { font-size:23px; margin:0 0 8px; }
+  .event { font-size:14px; color:#4b5563; margin-bottom:16px; }
+  label { display:block; font-weight:700; margin:12px 0 6px; }
+  input { width:100%; padding:13px; border:1px solid #d1d5db; border-radius:9px; font-size:16px; }
+  button { width:100%; border:0; border-radius:9px; padding:13px; margin-top:12px; font-size:16px; font-weight:700; cursor:pointer; }
+  #reader { width:100%; margin-top:16px; overflow:hidden; border-radius:12px; }
+  .status { margin-top:15px; padding:14px; border-radius:10px; text-align:center; font-weight:800; }
+  .idle { background:#e5e7eb; }
+  .ok { background:#dcfce7; }
+  .bad { background:#fee2e2; }
+  .student { margin-top:12px; line-height:1.55; }
+  .small { color:#6b7280; font-size:13px; margin-top:10px; line-height:1.45; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>APSS QR Attendance Scanner</h1>
+    <div class="event">Event: <strong id="event">Loading...</strong></div>
+
+    <label for="officer">Officer Name</label>
+    <input id="officer" placeholder="e.g. Officer 01" autocomplete="name">
+
+    <div id="reader"></div>
+
+    <div id="status" class="status idle">Enter officer name, then start scanner.</div>
+    <div id="details" class="student"></div>
+
+    <button onclick="startScanner()">Start Camera Scanner</button>
+    <button onclick="stopScanner()">Stop Scanner</button>
+
+    <div class="small">
+      Camera access is handled by this standalone web page, not by Google Apps Script's embedded HTML page.
+      Use HTTPS when hosting this file.
+    </div>
+  </div>
+</div>
+
+<script>
+const APPS_SCRIPT_URL = 'https://script.google.com/a/macros/lnu.edu.ph/s/AKfycbybshZQR82pfw6i_NMyQzf_oQFKggtD-EWIoLCdyc4rNPKH6fUvaNSDdP8slNsKPQhrog/exec';
+let qrScanner = null;
+let locked = false;
+
+function setStatus(text, cls) {
+  const el = document.getElementById('status');
+  el.textContent = text;
+  el.className = 'status ' + (cls || 'idle');
+}
+
+function loadEvent() {
+  if (APPS_SCRIPT_URL.includes('PASTE_')) {
+    document.getElementById('event').textContent = 'SET APPS SCRIPT URL';
+    return;
+  }
+  jsonp({action:'event'}, function(r) {
+    if (r.ok) {
+      document.getElementById('event').textContent = r.event + ' (' + r.status + ')';
+    } else {
+      document.getElementById('event').textContent = 'Connection error';
+    }
+  });
+}
+
+function startScanner() {
+  const officer = document.getElementById('officer').value.trim();
+  if (!officer) {
+    setStatus('Please enter the officer name first.', 'bad');
+    return;
+  }
+  if (APPS_SCRIPT_URL.includes('PASTE_')) {
+    setStatus('Set your Apps Script Web App URL in Scanner.html first.', 'bad');
+    return;
+  }
+  if (qrScanner) return;
+
+  qrScanner = new Html5Qrcode("reader");
+
+  // Standalone page: browser camera permission should work normally on HTTPS.
+  qrScanner.start(
+    {facingMode: {ideal: "environment"}},
+    {fps: 10, qrbox: {width:250, height:250}},
+    onScanSuccess,
+    function(){ /* ignore frame-by-frame decode misses */ }
+  ).then(function() {
+    setStatus('Camera ready — scan a student QR.', 'idle');
+  }).catch(function(err) {
+    setStatus('Camera could not start. Make sure this page is HTTPS and camera access is allowed.', 'bad');
+  });
+}
+
+function stopScanner() {
+  if (!qrScanner) return;
+  qrScanner.stop().then(function() {
+    qrScanner.clear();
+    qrScanner = null;
+    setStatus('Scanner stopped.', 'idle');
+  }).catch(function() {
+    qrScanner = null;
+  });
+}
+
+function onScanSuccess(decodedText) {
+  if (locked) return;
+  locked = true;
+  setStatus('Checking attendance...', 'idle');
+
+  const officer = document.getElementById('officer').value.trim();
+
+  jsonp({
+    action:'scan',
+    qr:decodedText,
+    officer:officer
+  }, function(result) {
+    if (result.ok) {
+      setStatus('✓ ATTENDANCE RECORDED', 'ok');
+      showStudent(result.student, result.timestamp);
+    } else if (result.duplicate) {
+      setStatus('⚠ ALREADY RECORDED', 'bad');
+      showStudent(result.student, 'Recorded at: ' + result.recordedAt);
+    } else {
+      setStatus(result.message || 'Scan failed.', 'bad');
+      document.getElementById('details').textContent = '';
+    }
+
+    // Prevent the same QR from being submitted repeatedly while it remains in frame.
+    setTimeout(function(){ locked = false; }, 1800);
+  });
+}
+
+function showStudent(s, extra) {
+  document.getElementById('details').innerHTML =
+    '<strong>' + esc(s.name) + '</strong><br>' +
+    'Student ID: ' + esc(s.studentId) + '<br>' +
+    esc(s.year) + ' · Section ' + esc(s.section) + '<br>' +
+    '<span class="small">' + esc(extra || '') + '</span>';
+}
+
+function jsonp(params, callback) {
+  const cb = 'apssCallback_' + Date.now() + '_' + Math.floor(Math.random()*10000);
+  window[cb] = function(data) {
+    try { callback(data); }
+    finally {
+      delete window[cb];
+      if (script.parentNode) script.parentNode.removeChild(script);
+    }
+  };
+
+  const query = Object.keys(params).map(function(k) {
+    return encodeURIComponent(k) + '=' + encodeURIComponent(params[k]);
+  }).join('&');
+
+  const script = document.createElement('script');
+  script.src = APPS_SCRIPT_URL + '?' + query + '&callback=' + cb;
+  script.onerror = function() {
+    delete window[cb];
+    setStatus('Could not connect to Google Sheets.', 'bad');
+  };
+  document.body.appendChild(script);
+}
+
+function esc(s) {
+  return String(s || '').replace(/[&<>"']/g, function(c) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c];
+  });
+}
+
+loadEvent();
+</script>
+</body>
+</html>
